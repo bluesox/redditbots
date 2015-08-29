@@ -12,16 +12,16 @@ import pickle
 
 class STOCKS:
 	def __init__(self, subreddit):
-		self.r = praw.Reddit("/r/BRSE stock automation by /u/b0wmz")
+        self.r = praw.Reddit("/r/BRSE stock automation by /u/b0wmz")
 		path = os.path.realpath(__file__)
 		path = path.replace(os.path.basename(__file__), "")
 		self._o = OAuth2Util.OAuth2Util(self.r, configfile=path+"oauth.txt")
 
 		self.subreddit = self.r.get_subreddit(subreddit)
 		self.prices = {} #share prices
-		self.credit = {} #users individual bagelance
+		self.credit = {} #users individual balance for traditional buy/sell
 		self.shares = {} #users individual shares
-		self.margin = {}
+		self.margin = {} #user's margin balance for option trading
 		with open(path+"doneposts", "rb") as file:
 			self.doneposts = pickle.load(file)
 
@@ -46,56 +46,85 @@ class STOCKS:
 			self.log.critical("No sticky found, aborting.")
 			exit()
 
+#	Load current prices from /wiki/prices
 	def getSharePrices(self):
 		page = self.r.get_wiki_page(self.subreddit, "prices").content_md
 		for idx,val in json.loads(page).iteritems():
 			self.prices[idx] = val['Value']
 		self.log.debug("Loaded share prices")
-
+#	Load all user balances from /wiki/credit
 	def getUsersCredit(self):
 		credit = json.loads(self.r.get_wiki_page(self.subreddit, "credit").content_md)
 		for idx, val in credit.iteritems():
 			self.credit[idx] = val["Balance"]
 			self.margin[idx] = val["Margin"]
 		self.log.debug("Loaded user credit")
-		
+#	Get balance for specified user		
 	def getUserCredit(self, username):
 		for idx, val in self.credit.iteritems():
 			if idx == username:
 				return val
-
+#	Get shareholdings for specified user
 	def getUserShares(self, username):
 		for idx, val in self.shares.iteritems():
 			if idx == username:
 				return val
-
+#	Load all shareholdings from /wiki/shares
 	def getTotalShares(self):
 		self.shares = json.loads(self.r.get_wiki_page(self.subreddit, "shares").content_md)
 		self.log.debug("Loaded user shares")
-
-	def creditUserShare(self, username, seller, amount):
+#	Calculate and return remaining balance
+	def creditUserShare(self, username, asset, amount):
+#		Check if user has an open account
 		try:
-			if self.credit[username] - (amount*self.prices[seller]) < 0:
+			balance = self.credit[username]
+#		If one does not exist, create one with a starting balance of 1000 credits
+#		(Is this missing a return statement, or is it unnecessary?)
+		except KeyError:
+			self.credit[username] = 1000
+			self.credit[margin] = 0
+			self.log.info("Created share account for %s. Starting balance %d" % (username, self.credit[username]))
+#		Attempt transaction
+		try:
+			balance = self.credit[username]
+			share_price = self.prices[asset]
+			debit = amount * share_price
+#			Deny trade if balance is less than trade price			
+			if balance - debit < 0:
 				return "nocash"
+#			Attempt sale if request is negative number
 			if amount < 0:
 				try:
-					if amount > self.shares[username][seller]: #user actually has shares
+					sale_amount = -amount #Convert sale to positive number of shares
+#					Deny sale if user doesn't have enough shares
+					if sale_amount > self.shares[username][asset]: 
 						return "noshares"
+#				Deny if user doesn't own asset
 				except KeyError:
 					return "noshares"
-			self.credit[username]-=amount*self.prices[seller]
-			self.log.info("Removed total %d from account %s. Total now is %d. Individual price for share %s %d" % (amount*self.prices[seller], username, self.credit[username], seller, self.prices[seller]))
+#			If successful, subtract asset price from balance
+			balance -= debit
+#			Log debit
+			self.log.info(
+				"User %s purchased %d of %s at %d each. Total sale of %d. Balance remaining: %d" % (
+					username, amount, asset, share_price, debit, balance
+				)
+			)
 		except KeyError:
-			removable = amount*self.prices[seller]
-			if removable > 1000:
-				self.log.error("%s doesn't have enough money to buy %d shares of %s" % (username, amount, seller))
+			debit = amount * self.prices[asset]
+			if debit > balance:
+				self.log.error("%s doesn't have enough money to buy %d shares of %s" % (username, amount, asset))
 				return "nocash"
-			self.credit[username] = 1000-removable
+			self.credit[username] = balance - debit
 			self.margin[username] = ""
-			self.log.info("Created share account for %s and removed %d. Total is now %d. Individual price for share %s %d" % (username, amount, self.credit[username], seller, self.prices[seller]))
-		return self.credit[username]
+			self.log.info(
+				"Created share account for %s and removed %d. Total is now %d. Individual price for share %s %d" % (
+					username, debit, balance, asset, self.prices[asset]
+				)
+			)
+			return self.credit[username]
 
-
+#	Check comments for transaction commands
 	def parseComments(self):
 		try:
 			for c in self.currentpost.comments:
@@ -109,18 +138,19 @@ class STOCKS:
 					continue
 				action = c.body.split()
 				self.log.debug(c.body)
-
+#				Ignore comments that don't start with proper commands
 				if action[0].lower() != "buy" and action[0].lower() != "sell":
 					self.log.info("Post isn't buy/sell post, ignoring %s" % c.id)
-					self.doneposts.append(c.id)
+					self.doneposts.append(c.id) #ignore post in the future
 					continue
-
+#				Inform user of improper code and skip post
 				try:
 					action[1] = action[1].upper()
 					self.log.debug(self.prices[action[1]])
 				except KeyError:
 					reply = "Invalid Code %s" % action[1]
 					self.log.error(reply)
+					self.doneposts.append(c.id) #ignore post in the future
 					c.reply(reply)
 					continue
 
@@ -129,6 +159,7 @@ class STOCKS:
 				except ValueError:
 					reply = "Invalid amount specified"
 					self.log.error(reply)
+					self.doneposts.append(c.id) #ignore post in the future
 					c.reply(reply)
 					continue
 
@@ -141,20 +172,22 @@ class STOCKS:
 				else:
 					reply = "Invalid action %s. Valid actions are BUY and SELL." % action[0]
 					self.log.error(reply)
+					self.doneposts.append(c.id)
 					c.reply(reply)
 					continue
 
 				try:
 					int(remaining)
+					self.doneposts.append(c.id)
 					c.reply("Trade confirmed. **Balance %d cr.**" % remaining)
 				except ValueError:
 					if remaining == "nocash":
-						c.reply("You do not have enough money to make this trade.")
 						self.doneposts.append(c.id)
+						c.reply("You do not have enough money to make this trade.")
 						continue
 					elif remaining == "noshares":
-						c.reply("You do not have this many shares.")
 						self.doneposts.append(c.id)
+						c.reply("You do not have this many shares.")
 						continue
 
 				self.doneposts.append(c.id)
@@ -182,6 +215,7 @@ class STOCKS:
 
 
 	def writeContent(self):
+		sortedShares = sorted(self.shares, 
 		self.r.edit_wiki_page(self.subreddit, "shares", json.dumps(self.shares), "Set new shares")
 		credit = {}
 		for idx,val in self.credit.iteritems():
