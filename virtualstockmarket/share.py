@@ -19,9 +19,10 @@ class STOCKS:
 
 		self.subreddit = self.r.get_subreddit(subreddit)
 		self.prices = {} #share prices
-		self.credit = {} #users individual bagelance
+		self.credit = {} #users individual balance
 		self.shares = {} #users individual shares
-		self.margin = {}
+		self.margin = {} #users individual margin (for options)
+		self.collateral = {} #users collateral assigned to margin
 		with open(self.path+"doneposts", "rb") as file:
 			self.doneposts = pickle.load(file)
 
@@ -47,12 +48,14 @@ class STOCKS:
 			exit()
 
 	def getSharePrices(self):
+		# Load prices of all share codes from /wiki/prices
 		page = self.r.get_wiki_page(self.subreddit, "prices").content_md
 		for idx,val in json.loads(page).iteritems():
 			self.prices[idx] = val['Value']
 		self.log.debug("Loaded share prices")
 
-	def getUsersCredit(self):
+	def getTotalCredit(self):
+		# Load all balances and margins from /wiki/credit
 		credit = json.loads(self.r.get_wiki_page(self.subreddit, "credit").content_md)
 		for idx, val in credit.iteritems():
 			self.credit[idx] = val["Balance"]
@@ -60,32 +63,48 @@ class STOCKS:
 		self.log.debug("Loaded user credit")
 		
 	def getUserCredit(self, username):
+		# Load individual user credit balance
 		for idx, val in self.credit.iteritems():
 			if idx == username:
 				return val
 
 	def getUserShares(self, username):
+		# Load individual user shareholdings
 		for idx, val in self.shares.iteritems():
 			if idx == username:
 				return val
+				
+	def getUserCollateral(self, username):
+		# Load individual user collateral
+		for idx, val in self.collateral.iteritems():
+			if idx = username:
+				return val
 
 	def getTotalShares(self):
+		# Load total shareholdings for all users from /wiki/shares
 		self.shares = json.loads(self.r.get_wiki_page(self.subreddit, "shares").content_md)
 		self.log.debug("Loaded user shares")
+		
+	def getTotalCollateral(self):
+		# Load total collateral for all users from /wiki/collateral
+		self.collateral = json.loads(self.r.get_wiki_page(self.subreddit, "collateral").content_md)
+		self.log.debug("Loaded user collateral")
 
 	def creditUserShare(self, username, seller, amount):
+		# Add/remove shares to/from user account
 		try:
-			if self.credit[username] - (amount*self.prices[seller]) < 0:
+			if self.credit[username] - (amount*self.prices[seller]) < 0: #user cannot afford to buy shares
 				return "nocash"
 			if amount < 0:
 				try:
-					if abs(amount) > self.shares[username][seller]: #user actually has shares
+					if abs(amount) > self.shares[username][seller]: #user tries to sell more shares than owned
 						return "noshares"
 				except KeyError:
 					return "noshares"
 			self.credit[username]-=amount*self.prices[seller]
 			self.log.info("Removed total %d from account %s. Total now is %d. Individual price for share %s %d" % (amount*self.prices[seller], username, self.credit[username], seller, self.prices[seller]))
 		except KeyError:
+			#user account does not exist
 			removable = amount*self.prices[seller]
 			if removable > 1000:
 				self.log.error("%s doesn't have enough money to buy %d shares of %s" % (username, amount, seller))
@@ -95,7 +114,63 @@ class STOCKS:
 			self.log.info("Created share account for %s and removed %d. Total is now %d. Individual price for share %s %d" % (username, amount, self.credit[username], seller, self.prices[seller]))
 		return self.credit[username]
 
+	def transferShares(self, username, shareCode, amount):
+		# Transfer shares between public holdings and collateral
+		try:
+			if self.shares[username][shareCode]+self.collateral[username][shareCode] - amount < 0: #user doesn't own shares of shareCode
+				return "noshares"
+			if amount < 0:
+				try:
+					if abs(amount) > self.collateral[username][shareCode]: #user actually has collateral
+						return "nocollateral"
+				except KeyError:
+					return "noshares"
+			self.shares[username][shareCode]-=amount
+			self.collateral[username][shareCode]+=amount
+			self.log.info("User %s transferred %d shares of %s to collateral. Total shares of %s is now %d. Total collateral of %s is now %d" % (username, amount, shareCode, shareCode, self.shares[username][shareCode], shareCode, self.collateral[username][shareCode]))
+		except KeyError:
+			removable = amount[shareCode]
+			if removable > self.shares[username][shareCode]:
+				self.log.error("%s doesn't have enough shares of %s to transfer." % (username, shareCode))
+				return "noshares"
+		return self.credit[username]
 
+	def transferCredits(self, username, amount):
+		# Transfer credits between user's balance and margin.
+		try:
+			if self.credit[username] - (amount) < 0: #user doesn't have enough credits to transfer
+				return "nocash"
+			if amount < 0:
+				try:
+					if abs(amount) > self.margin[username]: #user has margin balance
+						return "nomargin"
+				except KeyError:
+					return "nomargin"
+			self.credit[username]-=amount
+			self.margin[username]+=amount
+			if amount > 0:
+				self.log.info("Transferred %d from balance to margin for username %s. Balance is now %d. Margin is now %d" % (amount, username, self.credit[username], self.margin[username]))
+			if amount < 0:
+				self.log.info("Transferred %d from margin to balance for username %s. Balance is now %d. Margin is now %d" % (abs(amount), username, self.credit[username], self.margin[username]))
+		except KeyError:
+			# Creates user account if no balance exists for username.
+			removable = amount
+			if removable > 1000:
+				self.log.error("%s doesn't have enough credit to transfer" % (username))
+				return "nocash"
+			self.credit[username] = 1000-removable
+			self.margin[username] = removable
+			self.log.info("Created account for %s and transferred %d to margin. Balance is now %d. Margin is now %d" % (username, amount, self.credit[username], self.margin[username]))
+		return self.credit[username]
+		
+	def verifyCollateral(self, username):
+		#unsure how to code this function
+		# 1. Load user collateral
+		# 2. Calculate total value of shares in collateral
+		# 3. Compare collateral to margin
+		# 4. If collateral < 25% of margin, return "denied"
+		# 5. Else return "approved"
+		
 	def parseComments(self):
 		try:
 			for c in self.currentpost.comments:
@@ -107,8 +182,11 @@ class STOCKS:
 					self.doneposts.append(c.id)
 					c.reply("Post is edited, ignoring.")
 					continue
+				
 				action = c.body.split()
+				
 				if len(action) < 3:
+					# This must be re-written to allow for TRANSFER, SHORT, AND CLOSE commands.
 					self.log.debug("Post %s doesn't have 3 parameters, skipping")
 					self.doneposts.append(c.id)
 					c.reply("Invalid amount of parameters")
@@ -153,7 +231,7 @@ class STOCKS:
 					except ValueError:
 						self.log.info("Doesn't have something: %s" % c.id)
 				else:
-					reply = "Invalid action %s. Valid actions are BUY and SELL." % action[0]
+					reply = "Invalid action %s. Valid actions are BUY, SELL, TRANSFER, SHORT, AND CLOSE." % action[0]
 					self.log.error(reply)
 					c.reply(reply)
 					continue
@@ -211,8 +289,9 @@ class STOCKS:
 
 	def main(self):
 		self.getSharePrices()
-		self.getUsersCredit()
+		self.getTotalCredit()
 		self.getTotalShares()
+		self.getTotalCollateral()
 		self.parseComments()
 		time.sleep(2)
 		self.writeContent()
