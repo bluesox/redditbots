@@ -77,7 +77,7 @@ class STOCKS:
 	def getUserCollateral(self, username):
 		# Load individual user collateral
 		for idx, val in self.collateral.iteritems():
-			if idx = username:
+			if idx == username:
 				return val
 
 	def getTotalShares(self):
